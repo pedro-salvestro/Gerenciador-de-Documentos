@@ -1,90 +1,161 @@
 # Interface gráfica do Gerenciador de Documentos — design
 
-Data: 2026-11-17
+Data: 2026-11-17 (revisão 2: fluxo automatizado e relatórios opcionais)
 
 ## Intenção
 
-Hoje o Gerenciador de Documentos (`gerenciador_documentos.py`) roda como menu de
-terminal e trabalha sempre na pasta onde o script está. O objetivo é:
+Hoje o Gerenciador de Documentos (`gerenciador_documentos.py`) é um menu de
+terminal que trabalha na pasta onde o script está. O usuário repete sempre a
+mesma tarefa: preparar uma **pasta de entrega** só com os PDFs dos tipos de
+documento relevantes. O objetivo é:
 
-1. Substituir o menu por uma interface gráfica (janela).
-2. Permitir **escolher, dentro do programa, a pasta de trabalho**. O executável
-   não precisa estar dentro dela.
-3. Distribuir como **executável Windows** (`.exe`) que roda sem Python instalado.
-4. Reestruturar o código com boas práticas de engenharia de software: separar a
-   lógica da interface, dividir em módulos e tornar a lógica testável.
+1. **Automatizar essa tarefa** num fluxo único: escolher a pasta base, o nome da
+   pasta nova, os tipos e então executar. A pasta base nunca é alterada.
+2. Ter interface gráfica (janela) no lugar do menu de terminal, mantendo as
+   funções avulsas atuais para uso manual.
+3. Permitir **escolher a pasta de trabalho no programa**. O `.exe` pode ficar em
+   qualquer lugar.
+4. Permitir **desativar os relatórios CSV**.
+5. Distribuir como **executável Windows** (`.exe`) que roda sem Python instalado.
+6. Reestruturar o código com boas práticas: lógica separada da interface,
+   dividida em módulos e testável.
 
 ## Objetivos
 
-- Manter as 5 funções atuais com **as mesmas regras de negócio**:
-  1. Converter todos os Word/Excel da pasta (recursivo) para PDF.
-  2. Enviar à Lixeira, com os 9 modos atuais:
-     - todos os não PDF;
-     - Word/Excel;
-     - por extensão;
-     - seleção individual;
-     - pastas vazias;
-     - STEP/DWG;
-     - manter lista de arquivos;
-     - manter lista de pastas;
-     - documentos ET/DT/MD, inclusive PDFs.
-  3. Ver o relatório de convertidos.
-  4. Ver o relatório de apagados.
-  5. Copiar arquivos por código NVC para `NVCxxx/variante/<nome>`.
-- Manter todas as salvaguardas atuais:
-  - prévia antes de agir e confirmação explícita;
-  - Lixeira em vez de exclusão definitiva;
-  - checagem de caminho seguro (dentro da pasta, sem links simbólicos);
-  - cancelar quando há nome não encontrado;
-  - não sobrescrever destinos de cópia;
-  - substituir o PDF antigo só depois de sucesso;
-  - validação A4 do Excel;
-  - relatórios CSV.
-- Fazer a conversão sem travar a janela, com barra de progresso e log ao vivo.
-- Ter um código organizado em pacotes, com a lógica coberta por testes automatizados.
+### Fluxo de entrega (aba principal)
+
+Entrada: pasta base, nome da pasta nova e tipos permitidos (padrão: DE, LI, LD,
+PR, FO, editável). Resultado: uma pasta nova, ao lado da base, que contém
+**apenas PDFs dos tipos permitidos**, na mesma estrutura de subpastas da base.
+
+Regras de quais arquivos vão para a entrega:
+
+- **Tipo do arquivo:** é o código do nome no padrão `...-XX-<número>`, ao fim do
+  nome sem extensão (mesma forma da regra atual `-(ET|DT|MD)-\d+$`). Exemplo:
+  `NVC00410A-DE-001.docx` tem tipo DE. A comparação ignora maiúsculas e
+  minúsculas.
+- **PDF de tipo permitido:** é mantido como está.
+- **Word/Excel de tipo permitido:** é convertido para PDF, e o original não fica
+  na entrega.
+- **Todo o resto não vai para a entrega:**
+  - arquivos sem código de tipo;
+  - arquivos de tipo não permitido;
+  - arquivos de tipo permitido em outro formato, como `-DE-001.dwg`;
+  - `.zip`;
+  - pastas que ficariam vazias.
+
+### Funções avulsas (demais abas)
+
+Mantidas com **as mesmas regras de negócio** de hoje:
+
+- converter Word/Excel para PDF;
+- os 9 modos de envio à Lixeira;
+- ver os relatórios;
+- copiar por código NVC.
+
+Todas as salvaguardas atuais continuam valendo:
+
+- prévia antes de agir e confirmação explícita;
+- Lixeira em vez de exclusão definitiva;
+- checagem de caminho seguro;
+- cancelar quando há nome não encontrado;
+- não sobrescrever destinos de cópia;
+- substituir o PDF só depois de sucesso;
+- validação A4 do Excel.
+
+### Geral
+
+- Opção "Gerar relatórios CSV", lembrada entre usos, que vale para o fluxo e para
+  as funções avulsas.
+- Operações longas sem travar a janela, com barra de progresso e log ao vivo.
 
 ## Fora do escopo
 
-- Mudar regras de seleção, nomes de destino, formato dos CSV ou critérios de
+- Editor genérico de fluxos (adicionar, remover ou reordenar passos
+  arbitrários). O fluxo é fixo e só os parâmetros são editáveis.
+- Mudar as regras das funções avulsas, o formato dos CSV ou os critérios de
   conversão.
-- Suporte a macOS/Linux no `.exe`. A conversão de Excel depende do Microsoft Excel
-  via COM, ou seja, de Windows. O núcleo continua portável onde já era.
-- Instalador (MSI/Inno Setup), atualização automática, idiomas além do português.
+- `.exe` para macOS/Linux, instalador e atualização automática.
 
 ## O que tornaria isto um fracasso mesmo funcionando
 
-- A interface apagar algo que o script atual não apagaria, ou apagar sem mostrar
-  a prévia e pedir confirmação.
-- O programa enviar o próprio `.exe` ou os relatórios à Lixeira por acidente,
-  fora do modo que inclui relatórios explicitamente.
+- O fluxo alterar ou apagar **qualquer coisa na pasta base**.
+- A entrega conter um arquivo fora da regra, ou faltar um PDF de tipo permitido
+  sem que o resumo final aponte o motivo.
+- O fluxo sobrescrever uma pasta de entrega que já existe.
+- Uma função avulsa apagar algo sem prévia e confirmação, ou enviar à Lixeira o
+  próprio `.exe`.
 - A janela congelar durante a conversão, ou cada processo de conversão abrir uma
   janela nova do programa.
 
 ## Restrições
 
-- Windows 11, Python 3.14 (instalado), pywin32, pypdf e Send2Trash já instalados.
-- Será preciso instalar PySide6 e PyInstaller.
-- Excel obrigatório para planilhas. Word usa Office, com LibreOffice como
+- Windows 11, Python 3.14. pywin32, pypdf e Send2Trash já estão instalados.
+  Faltam PySide6 e PyInstaller.
+- O Excel é obrigatório para planilhas. O Word usa Office, com LibreOffice como
   alternativa (comportamento atual).
-- Objetos COM ficam restritos ao processo filho (comportamento atual, mantido).
+- Objetos COM ficam restritos ao processo filho (comportamento atual).
 
 ## Abordagens consideradas
 
+### Biblioteca de interface
+
 | Abordagem | Prós | Contras |
 |---|---|---|
-| **PySide6 (Qt)** — escolhida | Visual moderno; tabelas com caixas de seleção; threads e progresso robustos | `.exe` maior (~60–90 MB) |
-| Tkinter (ttk) | Já vem no Python; `.exe` pequeno | Visual datado; listas com seleção e tabelas mais trabalhosas |
-| Web (Flet/Electron) | Visual livre | Pesado; sem ganho real para ferramenta desktop interna |
+| **PySide6 (Qt)** — escolhida pelo usuário | Visual moderno; tabelas com caixas de seleção; threads e progresso robustos | `.exe` maior (~60–90 MB) |
+| Tkinter (ttk) | Já vem no Python; `.exe` pequeno | Visual datado; listas e tabelas mais trabalhosas |
+| Web (Flet/Electron) | Visual livre | Pesado; sem ganho para ferramenta desktop interna |
 
-O usuário escolheu PySide6, porque o uso principal é ver listas de arquivos,
-marcar itens e conferir antes de confirmar.
+### Como montar a pasta de entrega
+
+| Abordagem | Prós | Contras |
+|---|---|---|
+| Copiar a base inteira e depois apagar (passos literais do usuário) | Espelha o processo manual | Copia gigabytes que serão apagados; lento; muitas exclusões |
+| **Copiar só o que sobrevive e converter na cópia** — escolhida (decisão do Claude) | Mesmo resultado final; muito mais rápido; nada é apagado da base nem há exclusões em massa | O passo "apagar" deixa de existir como etapa visível; a prévia mostra o que fica de fora |
+
+Com essa escolha, a única exclusão na pasta nova é a do Word/Excel original
+depois de convertido. Essa exclusão é **definitiva**, sem Lixeira, porque o
+arquivo é uma cópia e o original está intacto na base.
 
 ## Decisões do usuário
 
-- A pasta de trabalho é escolhida no programa. O `.exe` pode ficar em qualquer
-  lugar.
-- Interface em PySide6.
-- O código deve ser reestruturado e separado em módulos.
+- O usuário escolhe a pasta de trabalho no programa. O `.exe` pode ficar em
+  qualquer lugar.
+- Interface em PySide6, com código reestruturado em módulos.
+- A aba principal escolhe e executa o fluxo, para automatizar a tarefa.
+- Os relatórios podem ser desativados.
+- O fluxo trabalha numa **pasta nova, com nome escolhido pelo usuário**. A base
+  não é alterada.
+- A entrega contém só PDFs dos tipos DE, LI, LD, PR e FO. Os PDFs existentes
+  desses tipos são mantidos, e os Word/Excel desses tipos são convertidos.
+- Arquivos sem código de tipo, de outros tipos ou de outros formatos (inclusive
+  `.dwg` de tipo permitido) e `.zip` ficam de fora. Pastas vazias são removidas.
+
+## Decisões do Claude (o usuário pode corrigir)
+
+- **Local da pasta nova:** fica ao lado da base, com o nome digitado. Por exemplo,
+  `Projetos\Obra X` com o nome "Obra X - Entrega" gera
+  `Projetos\Obra X - Entrega`. Se ela já existir, o fluxo para antes de começar.
+- **Confirmação:** uma só, no início, com um resumo (quantos PDFs serão copiados,
+  quantos Word/Excel serão convertidos, quantos arquivos ficam de fora) e a lista
+  detalhada consultável. Depois disso, tudo roda sem novas perguntas.
+- **Falha de conversão:** o Word/Excel original **fica** na pasta nova, para não
+  se perder, e o arquivo aparece como erro no resumo final e no relatório.
+- **Conflito de PDF:** se existirem `X-DE-001.docx` e `X-DE-001.pdf`, o PDF gerado
+  da conversão substitui o PDF copiado, que é o comportamento atual da conversão.
+  O resumo inicial lista esses casos.
+- **Tipos permitidos:** a lista fica num campo de texto, com o padrão
+  "DE, LI, LD, PR, FO", e a última lista usada é lembrada.
+- **Ligar e desligar passos:** cada passo do fluxo pode ser desligado, por
+  exemplo para só montar a entrega sem converter. Por padrão, todos ficam
+  ligados.
+- **Relatórios na pasta nova:** quando ligados, os relatórios do fluxo
+  (`arquivos_convertidos.csv` e `arquivos_ignorados.csv`, este com o que ficou de
+  fora) são gravados na pasta nova. Nas funções avulsas, continuam na pasta de
+  trabalho, como hoje.
+- **Proteção do programa:** as funções avulsas nunca listam o próprio `.exe` nem
+  o código-fonte, em nenhum modo. Hoje, o modo "todos os não PDF" incluiria o
+  próprio script.
 
 ## Design
 
@@ -98,25 +169,29 @@ Gerenciador de Documentos/
     nucleo/                    # sem Qt, sem input()/print(); testável
       __init__.py
       constantes.py            # extensões WORD/EXCEL/CAD, nomes de relatório, IGNORAR_DIRS
-      espaco.py                # EspacoTrabalho: raiz escolhida + caminhos protegidos
-      arquivos.py              # listar_arquivos, listar_pastas, listar_pastas_vazias, separar_lista
-      relatorios.py            # gravar_csv, ler_csv, caminhos dos relatórios
+      espaco.py                # EspacoTrabalho: raiz + caminhos protegidos
+      arquivos.py              # listar_arquivos, listar_pastas, pastas vazias, separar_lista, tipo_documento
+      relatorios.py            # Relatorio (pode estar desativado), gravar/ler CSV
       conversao.py             # Conversor, validar_pdf_a4, converter_arquivo, planejar/executar
+      fluxo.py                 # ParametrosFluxo, planejar_fluxo -> PlanoFluxo, executar_fluxo
       limpeza.py               # 9 seletores -> Previa; enviar_lixeira
       copia.py                 # planejar_copia -> PlanoCopia; executar_copia
       erros.py                 # ErroValidacao (mensagem + itens)
     gui/
       __init__.py
-      app.py                   # cria QApplication e janela
-      janela_principal.py      # seletor de pasta + abas
+      app.py                   # QApplication, configurações (QSettings)
+      janela_principal.py      # abas + opção de relatórios + barra de status
       trabalhador.py           # execução em segundo plano (QThread) com sinais
       tabela_itens.py          # tabela reutilizável com caixas de seleção
+      seletor_pasta.py         # campo + botão "Escolher…"
+      aba_fluxo.py             # aba principal
       aba_conversao.py
       aba_limpeza.py
       aba_copia.py
       aba_relatorios.py
   tests/
-    test_arquivos.py, test_limpeza.py, test_copia.py, test_conversao_plano.py, test_relatorios.py
+    test_arquivos.py, test_fluxo.py, test_limpeza.py, test_copia.py,
+    test_conversao_plano.py, test_relatorios.py
   requirements.txt             # PySide6, pywin32, pypdf, Send2Trash
   requirements-dev.txt         # pytest, pyinstaller
   gerenciador.spec             # configuração do PyInstaller
@@ -125,124 +200,158 @@ Gerenciador de Documentos/
 
 ### Núcleo: separar "planejar" de "executar"
 
-Cada operação destrutiva ou longa vira duas etapas, e nenhuma delas faz `input()`
-nem `print()`:
+Toda operação longa ou destrutiva tem duas etapas, sem `input()` nem `print()`:
 
-- **Planejar:** recebe a pasta e os parâmetros e devolve uma prévia, ou seja, a
-  lista de itens com tipo e destino. Se algo inviabiliza a operação (nomes não
-  encontrados, código inválido, destino já existe), levanta `ErroValidacao` com a
-  mensagem e a lista de itens problemáticos.
-- **Executar:** recebe a prévia confirmada e devolve a lista de resultados por
-  item. Também grava o CSV.
+- **Planejar:** recebe a pasta e os parâmetros e devolve uma prévia (os itens
+  com tipo, destino e motivo). Se algo inviabiliza a operação, levanta
+  `ErroValidacao` com a mensagem e a lista de itens.
+- **Executar:** recebe o plano confirmado, informa o progresso por callback,
+  respeita o cancelamento e devolve os resultados por item.
 
-`EspacoTrabalho(raiz)` substitui o `RAIZ` global e conhece os caminhos
-protegidos que nunca entram em listagens nem em prévias:
+`Relatorio` recebe `ativo: bool`. Quando está desativado, as gravações não fazem
+nada, então as funções de execução não precisam de `if` espalhado.
 
-- os dois relatórios CSV, como hoje (exceto no modo "todos os não PDF", que os
-  inclui de propósito, como hoje);
-- `sys.executable` quando o programa está empacotado, além de `main.py` e da pasta
-  `gerenciador/` se a pasta de trabalho for a do código-fonte. Isso substitui a
-  proteção atual do próprio `.py`.
+`EspacoTrabalho(raiz)` substitui o `RAIZ` global e sabe quais caminhos são
+protegidos: os relatórios, `sys.executable` quando está empacotado, e
+`main.py`/`gerenciador/` quando a pasta é a do código-fonte.
 
-**Mudança deliberada:** hoje o modo "todos os não PDF" incluiria o próprio script
-se ele estivesse na pasta. A nova versão protege o programa em todos os modos.
+### Fluxo de entrega
 
-Os relatórios continuam sendo gravados **na pasta de trabalho escolhida**,
-como hoje.
+`ParametrosFluxo`: base, nome_destino, tipos, converter (bool) e processos.
 
-### Conversão
+`planejar_fluxo(parametros) -> PlanoFluxo`:
+1. Valida o nome da pasta (as mesmas regras do nome de pasta da cópia atual).
+   Garante que `destino = base.parent / nome` não existe e não fica dentro da
+   base.
+2. Percorre a base com `listar_arquivos` e classifica cada arquivo em `copiar`
+   (PDF de tipo permitido), `converter` (Word/Excel de tipo permitido) ou
+   `ignorar` (com motivo: sem tipo, tipo não permitido, formato não aceito).
+3. Calcula o PDF de destino de cada conversão com a regra atual de nomes
+   duplicados e detecta os conflitos com PDFs copiados.
 
-- `planejar_conversao(espaco)` monta a lista de pares (origem, destino) com a
-  regra atual de nomes duplicados e sufixos `_2`, `_3`…
+`executar_fluxo(plano, relatorio, ao_progresso, cancelado)`:
+1. Cria a pasta destino e copia (`copy2`) os PDFs e os Word/Excel do plano,
+   recriando as subpastas.
+2. Converte os Word/Excel **dentro da pasta destino**, reaproveitando
+   `executar_conversao` com o `ProcessPoolExecutor` atual.
+3. Para cada conversão bem-sucedida, apaga o Word/Excel copiado. Antes de apagar,
+   confere que o caminho está dentro da pasta destino.
+4. Remove as pastas vazias da pasta destino.
+5. Grava os relatórios (se ativos) e devolve o resumo: copiados, convertidos,
+   erros, ignorados e cancelados.
+
+Cancelamento: os itens pendentes não iniciam. A pasta nova fica com o que já foi
+feito, e o resumo indica que o fluxo foi interrompido. Nada é desfeito, porque a
+base está intacta e basta apagar a pasta nova e rodar de novo.
+
+A base é somente leitura no fluxo. Os testes verificam isso comparando a
+árvore da base antes e depois.
+
+### Conversão (função avulsa e reutilizada pelo fluxo)
+
+- `planejar_conversao(espaco)` monta os pares (origem, destino) com a regra atual
+  de duplicados.
 - `executar_conversao(trabalhos, processos, ao_concluir_item, cancelado)` usa o
-  `ProcessPoolExecutor` com `spawn`, como hoje. `converter_arquivo` continua
-  sendo uma função de módulo, que pode ser enviada ao processo filho.
-- O cancelamento cancela os itens ainda não iniciados. Os itens em andamento
-  terminam, porque matar o Excel no meio deixaria processos órfãos. Itens
-  cancelados aparecem no relatório como `cancelado`.
-- `main.py` chama `multiprocessing.freeze_support()` antes de qualquer
-  importação de Qt. Isso é necessário no `.exe`.
+  `ProcessPoolExecutor` com `spawn`, como hoje.
+- Cancelar não inicia os itens pendentes. Os itens em andamento terminam, para
+  não deixar o Excel órfão.
+- `main.py` chama `multiprocessing.freeze_support()` antes de importar o Qt.
 
 ### Interface
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ Pasta de trabalho: [C:\...\Projeto X            ] [Escolher…] │
-├──────────────────────────────────────────────────────────────┤
-│ [Converter] [Limpeza] [Copiar por código] [Relatórios]       │
-│                                                              │
-│  (conteúdo da aba)                                           │
-│                                                              │
-├──────────────────────────────────────────────────────────────┤
-│ status: 128 arquivos na pasta · Office: Word ✓ Excel ✓ · LO ✗ │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ [Fluxo de entrega] [Converter] [Limpeza] [Copiar por código] [Relatórios] │
+├──────────────────────────────────────────────────────────────────┤
+│ Pasta base:      [C:\Projetos\Obra X                ] [Escolher…] │
+│ Nome da nova:    [Obra X - Entrega          ]                     │
+│                  → será criada: C:\Projetos\Obra X - Entrega       │
+│ Tipos mantidos:  [DE, LI, LD, PR, FO        ]                     │
+│ Passos:  [x] Montar pasta com os tipos   [x] Converter Word/Excel  │
+│ Processos simultâneos: [2]                                        │
+│                                         [ Analisar ]              │
+│ ┌ Resumo ──────────────────────────────────────────────────────┐ │
+│ │ 312 PDFs a copiar · 48 Word/Excel a converter · 1.204 fora     │ │
+│ │ 2 conflitos de PDF (ver lista)                                 │ │
+│ │ [Ver detalhes ▾] tabela: arquivo | ação | motivo               │ │
+│ └──────────────────────────────────────────────────────────────┘ │
+│ [████████████░░░░░░░░] 60%  Convertendo 29/48      [Cancelar]     │
+│                                         [ Executar fluxo ]        │
+├──────────────────────────────────────────────────────────────────┤
+│ [x] Gerar relatórios CSV   ·  Office: Word ✓ Excel ✓  · LO ✗       │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-- **Pasta de trabalho:** botão "Escolher…" abre o seletor de pastas. A última
-  pasta usada é lembrada (QSettings). Sem pasta válida, as abas ficam
-  desabilitadas.
-- **Converter:** botão "Analisar" monta uma tabela com Origem, PDF de destino e
-  Status, além do campo "Processos simultâneos" (padrão = regra atual). Ao clicar
-  em "Iniciar", a barra de progresso avança e cada linha mostra OK ou o erro.
-  O botão "Cancelar" interrompe os itens pendentes. Ao fim, um resumo mostra
-  convertidos e erros, com link para o relatório.
-- **Limpeza:** lista com os 9 modos à esquerda.
-  - Modos simples mostram direto a prévia em tabela (caminho e tipo).
-  - "Por extensão" mostra caixas de seleção por extensão.
-  - "Seleção individual" mostra a tabela com caixas marcáveis e um botão
-    "Marcar todos".
-  - "Manter lista de arquivos/pastas" mostra uma caixa de texto para colar a
-    lista (vírgula, ponto e vírgula ou uma por linha, como hoje) e o botão
-    "Gerar prévia". Nomes não encontrados aparecem em vermelho e bloqueiam a
-    operação.
-  - O botão "Enviar N itens à Lixeira" abre uma confirmação com o número de
-    itens. O resultado aparece na própria tabela.
-- **Copiar por código:** caixa para colar códigos e campo "Nome da pasta final".
-  "Gerar prévia" mostra a tabela Origem → Destino, e "Copiar" pede confirmação.
-  Os erros de validação aparecem acima da tabela.
-- **Relatórios:** alternância entre Convertidos e Apagados, com tabela lida do
-  CSV, botão "Abrir no Excel" (abre o arquivo) e "Atualizar".
-- Operações que varrem a pasta inteira ou executam ações rodam no
-  `trabalhador.py` (QThread) para não travar a janela.
+- **Fluxo de entrega (aba inicial):**
+  - Os campos são lembrados entre usos (QSettings).
+  - "Analisar" gera o plano numa thread separada e mostra o resumo, com uma
+    tabela filtrável por ação.
+  - "Executar fluxo" só fica habilitado depois de analisar e pede uma
+    confirmação com os números do resumo.
+  - Durante a execução, os campos ficam bloqueados e aparecem o progresso, o log
+    e o botão Cancelar.
+  - Ao fim, mostra o resumo e o botão "Abrir pasta".
+- **Converter, Limpeza e Copiar por código:** cada aba tem o próprio seletor de
+  "Pasta de trabalho", com a última usada lembrada, e o mesmo comportamento
+  descrito na revisão 1:
+  - prévia em tabela;
+  - nomes não encontrados em vermelho bloqueiam a operação;
+  - confirmação antes de agir;
+  - resultado na tabela.
+  - Na Limpeza, os 9 modos ficam numa lista à esquerda. Os modos com lista de
+    manutenção usam uma caixa de texto para colar a lista.
+- **Relatórios:** escolhe a pasta, alterna entre Convertidos, Apagados e
+  Ignorados (fluxo), mostra a tabela e tem os botões "Abrir no Excel" e
+  "Atualizar".
+- **Barra inferior:** caixa "Gerar relatórios CSV" (global, lembrada) e a
+  detecção de Office/LibreOffice.
 
 ### Testes
 
-- pytest sobre o núcleo, usando pastas temporárias (`tmp_path`) com arquivos
-  fictícios. Os testes cobrem:
-  - os 9 seletores de limpeza, incluindo nomes não encontrados e proteção de
-    pastas-pai;
-  - o plano de conversão com nomes duplicados;
-  - o plano de cópia: código inválido, destino existente, nome repetido;
-  - os caminhos protegidos (`.exe`, relatórios);
-  - `separar_lista`;
-  - gravação e leitura de CSV.
-- O envio à Lixeira é testado com `send2trash` substituído por um dublê, para que
-  os testes não mexam na Lixeira real.
-- A conversão real (COM/LibreOffice) não entra nos testes automatizados. Ela é
-  verificada manualmente com um `.docx` e um `.xlsx` de exemplo.
+pytest sobre o núcleo, com `tmp_path` e arquivos fictícios. Os testes cobrem:
+
+- classificação do fluxo (cada regra de tipo e formato, `.zip`, sem tipo,
+  maiúsculas e minúsculas);
+- base intacta depois do fluxo;
+- destino existente ou dentro da base;
+- remoção de pastas vazias;
+- o original fica quando a conversão falha;
+- os relatórios desativados não criam arquivos.
+
+Para isso, a conversão é substituída por um dublê que gera um PDF fictício ou
+falha de propósito.
+
+Também cobrem:
+
+- os 9 seletores de limpeza, com `send2trash` dublado;
+- o plano de cópia;
+- o plano de conversão com duplicados;
+- os caminhos protegidos;
+- `separar_lista` e o CSV.
+
+A conversão real (COM/LibreOffice) é verificada manualmente com `.docx` e `.xlsx`
+de exemplo, rodando o fluxo pelo programa e pelo `.exe`.
 
 ### Executável
 
-- PyInstaller em modo **onefile** e `--windowed` (sem console). Gera um único
-  `GerenciadorDocumentos.exe` em `dist/`.
+- PyInstaller em modo onefile e `--windowed`, gerando
+  `dist/GerenciadorDocumentos.exe`.
 - Inclui pywin32 (`pythoncom`, `win32com`), pypdf e Send2Trash. O PySide6 é
-  enxugado: só QtCore, QtGui e QtWidgets.
-- Primeiro, valido que a conversão em vários processos funciona dentro do `.exe`
-  (`freeze_support`), sem abrir janelas extras.
+  limitado a QtCore, QtGui e QtWidgets.
+- Verificar que a conversão em vários processos funciona dentro do `.exe`, sem
+  abrir janelas extras.
 
 ### Script antigo
 
-`gerenciador_documentos.py` fica intocado durante o trabalho, como referência.
-Ele só é removido no fim, se o usuário aprovar.
+`gerenciador_documentos.py` fica intocado como referência. Ele só é removido no
+fim, se o usuário aprovar.
 
 ## Deixado para quem implementar
 
-- Layout fino dos widgets, textos de botões e ícone do programa. Se não houver
-  ícone, usa o padrão.
-- Divisão interna das funções dentro de cada módulo do núcleo.
-- Mensagens de erro: reaproveitar as atuais sempre que possível.
+- Layout fino, textos dos botões e ícone (sem ícone, usa o padrão).
+- Divisão interna das funções em cada módulo.
+- Reaproveitar as mensagens de erro atuais sempre que possível.
 
 ## Observações
 
-A pasta não é um repositório git, então este documento não foi commitado. Se
-desejar, posso iniciar um repositório git.
+A pasta não é um repositório git, então este documento não foi commitado.
