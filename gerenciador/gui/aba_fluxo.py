@@ -17,18 +17,28 @@ from ..nucleo.conversao import converter_arquivo, processos_padrao
 from ..nucleo.erros import ErroValidacao
 from ..nucleo.fluxo import (
     COPIAR, CONVERTER, IGNORAR, ParametrosFluxo, PlanoFluxo, ResumoFluxo, executar_fluxo,
-    planejar_fluxo, separar_tipos,
+    planejar_fluxo, separar_selecao, separar_tipos,
 )
 from ..nucleo.constantes import TIPOS_PADRAO
 from ..nucleo.relatorios import Relatorio
 from .configuracoes import Configuracoes
-from .dialogos import confirmar, mostrar_erro
+from .dialogos import confirmar, listar_itens, mostrar_erro
 from .seletor_pasta import SeletorPasta
 from .tabela_itens import TabelaItens
 from .trabalhador import Trabalhador, executar_em_segundo_plano
 
 ROTULO_ACAO = {COPIAR: "Copiar", CONVERTER: "Converter", IGNORAR: "Fora da entrega"}
 FILTROS = ("Todos", "Copiar", "Converter", "Fora da entrega")
+LIMITE_PROBLEMAS_RESUMO = 5
+
+
+def resumir_problemas(problemas: list[tuple[str, str]]) -> str:
+    """'Itens da lista com problema: A (motivo), B (motivo) e mais N'."""
+    partes = [f"{item} ({motivo})" for item, motivo in problemas[:LIMITE_PROBLEMAS_RESUMO]]
+    texto = "Itens da lista com problema: " + ", ".join(partes)
+    if len(problemas) > LIMITE_PROBLEMAS_RESUMO:
+        texto += f" e mais {len(problemas) - LIMITE_PROBLEMAS_RESUMO}"
+    return texto
 
 
 class AbaFluxo(QWidget):
@@ -56,11 +66,22 @@ class AbaFluxo(QWidget):
         self.seletor_base = SeletorPasta("", "fluxo/base", self._config)
         self.campo_nome = QLineEdit()
         self.campo_nome.setPlaceholderText("Ex.: Obra X - Entrega")
+        self.seletor_destino = SeletorPasta("", "fluxo/destino", self._config)
+        self.seletor_destino.campo.setPlaceholderText("Vazio = ao lado da pasta base")
         self.rotulo_destino = QLabel()
         self.rotulo_destino.setStyleSheet("font-style: italic;")
         self.campo_tipos = QLineEdit()
         self.campo_tipos.setToolTip("Códigos de duas letras separados por vírgula. "
                                     "O tipo vem do fim do nome: NVC00410A-DE-001 → DE.")
+        self.campo_selecao = QPlainTextEdit()
+        self.campo_selecao.setPlaceholderText(
+            "Vazio = todos. Ex.: NVC00410A, NVC00411, NVC00412A-DE-001")
+        self.campo_selecao.setToolTip(
+            "Um por linha ou separados por vírgula.\n"
+            "NVC00410 → todas as variantes · NVC00410A → só essa variante · "
+            "NVC00410A-DE-001 → só esse arquivo.")
+        self.campo_selecao.setFixedHeight(
+            self.campo_selecao.fontMetrics().lineSpacing() * 3 + 12)
         self.caixa_converter = QCheckBox("Converter Word/Excel para PDF")
         self.campo_processos = QSpinBox()
         self.campo_processos.setRange(1, 16)
@@ -76,8 +97,10 @@ class AbaFluxo(QWidget):
         formulario = QFormLayout()
         formulario.addRow("Pasta base:", self.seletor_base)
         formulario.addRow("Nome da pasta nova:", self.campo_nome)
+        formulario.addRow("Salvar em:", self.seletor_destino)
         formulario.addRow("", self.rotulo_destino)
         formulario.addRow("Tipos mantidos:", self.campo_tipos)
+        formulario.addRow("NVCs / arquivos:", self.campo_selecao)
         formulario.addRow("Opções:", opcoes)
         grupo = QGroupBox("O que fazer")
         grupo.setLayout(formulario)
@@ -137,14 +160,17 @@ class AbaFluxo(QWidget):
     def _carregar_preferencias(self) -> None:
         self.campo_nome.setText(str(self._config.valor("fluxo/nome", "") or ""))
         self.campo_tipos.setText(str(self._config.valor("fluxo/tipos", ", ".join(TIPOS_PADRAO))))
+        self.campo_selecao.setPlainText(str(self._config.valor("fluxo/selecao", "") or ""))
         self.caixa_converter.setChecked(self._config.valor_bool("fluxo/converter", True))
         self.campo_processos.setValue(
             self._config.valor_int("fluxo/processos", processos_padrao(16)))
 
     def _conectar(self) -> None:
         self.seletor_base.pasta_alterada.connect(lambda _: self._parametros_mudaram())
+        self.seletor_destino.campo.textChanged.connect(self._parametros_mudaram)
         self.campo_nome.textChanged.connect(self._parametros_mudaram)
         self.campo_tipos.textChanged.connect(self._parametros_mudaram)
+        self.campo_selecao.textChanged.connect(self._parametros_mudaram)
         self.caixa_converter.toggled.connect(self._parametros_mudaram)
         self.campo_processos.valueChanged.connect(
             lambda v: self._config.definir("fluxo/processos", v))
@@ -160,6 +186,7 @@ class AbaFluxo(QWidget):
     def _parametros_mudaram(self, *_args) -> None:
         self._config.definir("fluxo/nome", self.campo_nome.text())
         self._config.definir("fluxo/tipos", self.campo_tipos.text())
+        self._config.definir("fluxo/selecao", self.campo_selecao.toPlainText())
         self._config.definir("fluxo/converter", self.caixa_converter.isChecked())
         self._plano = None
         self.botao_executar.setEnabled(False)
@@ -168,21 +195,30 @@ class AbaFluxo(QWidget):
     def _texto_base(self) -> str:
         return self.seletor_base.campo.text().strip()
 
+    def _texto_destino(self) -> str:
+        return self.seletor_destino.campo.text().strip()
+
     def _atualizar_destino(self) -> None:
         base, nome = self._texto_base(), self.campo_nome.text().strip()
-        if base and nome:
-            self.rotulo_destino.setText(f"→ será criada: {Path(base).parent / nome}")
+        pasta = self._texto_destino() or (str(Path(base).parent) if base else "")
+        if pasta and nome:
+            self.rotulo_destino.setText(f"→ será criada: {Path(pasta) / nome}")
+        elif self._texto_destino():
+            self.rotulo_destino.setText(f"→ a pasta nova é criada em {self._texto_destino()}")
         else:
             self.rotulo_destino.setText("→ a pasta nova é criada ao lado da pasta base")
 
     def _parametros(self) -> ParametrosFluxo:
         if not self._texto_base():
             raise ErroValidacao("Escolha a pasta base.")
+        destino = self._texto_destino()
         return ParametrosFluxo(
             base=Path(self._texto_base()), nome_destino=self.campo_nome.text(),
             tipos=separar_tipos(self.campo_tipos.text()),
             converter=self.caixa_converter.isChecked(),
-            processos=self.campo_processos.value())
+            processos=self.campo_processos.value(),
+            pasta_destino=Path(destino) if destino else None,
+            selecao=separar_selecao(self.campo_selecao.toPlainText()))
 
     def _aplicar_filtro(self, texto: str) -> None:
         self.tabela.filtrar_coluna(1, "" if texto == "Todos" else texto)
@@ -221,7 +257,10 @@ class AbaFluxo(QWidget):
                   f"{len(plano.ignorados)} fora da entrega"]
         if plano.conflitos:
             partes.append(f"{len(plano.conflitos)} conflitos de PDF")
-        self.rotulo_resumo.setText(" · ".join(partes) + f"\nPasta nova: {plano.destino_raiz}")
+        texto = " · ".join(partes) + f"\nPasta nova: {plano.destino_raiz}"
+        if plano.problemas:
+            texto += "\n" + resumir_problemas(plano.problemas)
+        self.rotulo_resumo.setText(texto)
         self.botao_executar.setEnabled(bool(plano.a_copiar or plano.a_converter))
 
     def _ao_falhar_analise(self, mensagem: str, itens: list) -> None:
@@ -236,9 +275,14 @@ class AbaFluxo(QWidget):
         if plano is None:
             return
         plano.parametros.processos = self.campo_processos.value()
+        aviso = ""
+        if plano.problemas:
+            aviso = ("Estes itens da lista não vão entrar:\n"
+                     + listar_itens([f"{item} — {motivo}" for item, motivo in plano.problemas])
+                     + "\n\nDeseja continuar sem eles?\n\n")
         if not confirmar(
                 self, "Executar fluxo",
-                f"Criar a pasta:\n{plano.destino_raiz}\n\n"
+                f"{aviso}Criar a pasta:\n{plano.destino_raiz}\n\n"
                 f"• {len(plano.a_copiar)} PDFs serão copiados\n"
                 f"• {len(plano.a_converter)} Word/Excel serão convertidos\n"
                 f"• {len(plano.ignorados)} arquivos ficam fora da entrega\n\n"
@@ -299,8 +343,8 @@ class AbaFluxo(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._destino_final)))
 
     def _definir_ocupado(self, ocupado: bool, cancelavel: bool = False) -> None:
-        for widget in (self.seletor_base, self.campo_nome, self.campo_tipos,
-                       self.caixa_converter, self.campo_processos, self.botao_analisar):
+        for widget in (self.seletor_base, self.campo_nome, self.seletor_destino,
+                       self.campo_tipos, self.campo_selecao, self.caixa_converter, self.campo_processos, self.botao_analisar):
             widget.setEnabled(not ocupado)
         if ocupado:
             self.botao_executar.setEnabled(False)

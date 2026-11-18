@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
+from conftest import criar, relativos
 from falsos import converter_ok
 from gerenciador.gui.aba_fluxo import AbaFluxo
 from gerenciador.nucleo.relatorios import Relatorio
@@ -98,3 +99,75 @@ def test_campos_lembrados(qtbot, config_temp, base):
     assert segunda.campo_nome.text() == "Minha entrega"
     assert segunda.campo_tipos.text() == "DE, PR"
     assert segunda.seletor_base.pasta == base
+
+
+# --- Salvar em e lista de NVCs/arquivos -----------------------------------------------
+
+def sim_capturando(monkeypatch):
+    textos = []
+
+    def question(pai, titulo, texto, *a, **k):
+        textos.append(texto)
+        return QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(QMessageBox, "question", question)
+    return textos
+
+
+def test_salvar_em_outra_pasta(qtbot, aba, base, tmp_path, monkeypatch):
+    sim_capturando(monkeypatch)
+    saida = tmp_path / "saida"
+    saida.mkdir()
+    preparar(aba, base)
+    aba.seletor_destino.definir_pasta(saida)
+    assert str(saida / "Entrega") in aba.rotulo_destino.text()
+    analisar(qtbot, aba)
+    aba.botao_executar.click()
+    qtbot.waitUntil(lambda: aba.botao_abrir_pasta.isEnabled(), timeout=10000)
+    assert (saida / "Entrega" / "a" / "X-LI-002.pdf").exists()
+    assert not (base.parent / "Entrega").exists()
+
+
+def test_selecao_com_problema_avisa(qtbot, aba, tmp_path, monkeypatch):
+    criar(tmp_path, "obra/a/NVC00410A-DE-001.pdf", "obra/a/NVC00411A-DE-001.pdf")
+    base = tmp_path / "obra"
+    textos = sim_capturando(monkeypatch)
+    preparar(aba, base)
+    aba.campo_selecao.setPlainText("NVC00410A\nNVC09999")
+    analisar(qtbot, aba)
+    assert ("Itens da lista com problema: NVC09999 (não encontrado na pasta base)"
+            in aba.rotulo_resumo.text())
+    aba.botao_executar.click()
+    qtbot.waitUntil(lambda: aba.botao_abrir_pasta.isEnabled(), timeout=10000)
+    assert textos[0].startswith("Estes itens da lista não vão entrar:")
+    assert "NVC09999 — não encontrado na pasta base" in textos[0]
+    assert relativos(tmp_path / "Entrega") == ["a/NVC00410A-DE-001.pdf",
+                                               "arquivos_ignorados.csv"]
+
+
+def test_selecao_sem_problema_confirmacao_normal(qtbot, aba, base, monkeypatch):
+    textos = sim_capturando(monkeypatch)
+    preparar(aba, base)
+    analisar(qtbot, aba)
+    aba.botao_executar.click()
+    qtbot.waitUntil(lambda: aba.botao_abrir_pasta.isEnabled(), timeout=10000)
+    assert textos[0].startswith("Criar a pasta:")
+
+
+def test_mudar_selecao_invalida_analise(qtbot, aba, base):
+    preparar(aba, base)
+    analisar(qtbot, aba)
+    aba.campo_selecao.setPlainText("NVC1")
+    assert not aba.botao_executar.isEnabled()
+
+
+def test_campos_novos_lembrados(qtbot, config_temp, base, tmp_path):
+    saida = tmp_path / "saida"
+    saida.mkdir()
+    primeira = AbaFluxo(config_temp, lambda: Relatorio())
+    qtbot.addWidget(primeira)
+    primeira.seletor_destino.definir_pasta(saida)
+    primeira.campo_selecao.setPlainText("NVC00410A, NVC00411")
+    segunda = AbaFluxo(config_temp, lambda: Relatorio())
+    qtbot.addWidget(segunda)
+    assert segunda.seletor_destino.pasta == saida
+    assert segunda.campo_selecao.toPlainText() == "NVC00410A, NVC00411"

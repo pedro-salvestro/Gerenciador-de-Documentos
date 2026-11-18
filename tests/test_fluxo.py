@@ -8,7 +8,7 @@ from falsos import converter_falha, converter_ok
 from gerenciador.nucleo import fluxo as modulo_fluxo
 from gerenciador.nucleo.erros import ErroValidacao
 from gerenciador.nucleo.fluxo import (
-    ParametrosFluxo, executar_fluxo, planejar_fluxo, separar_tipos,
+    ParametrosFluxo, executar_fluxo, planejar_fluxo, separar_selecao, separar_tipos,
 )
 from gerenciador.nucleo.relatorios import Relatorio, ler_csv
 
@@ -143,3 +143,99 @@ def test_conflito_detectado(base):
     criar(base, "a/X-LI-002.pdf")
     plano = plano_de(base)
     assert plano.conflitos == [plano.destino_raiz / "a" / "X-LI-002.pdf"]
+
+
+# --- Pasta de destino escolhida --------------------------------------------------------
+
+def test_destino_em_outra_pasta(base, tmp_path):
+    outra = tmp_path / "saida"
+    outra.mkdir()
+    assert plano_de(base, pasta_destino=outra).destino_raiz == outra.resolve() / "Entrega"
+
+
+def test_destino_inexistente(base, tmp_path):
+    with pytest.raises(ErroValidacao, match="não existe"):
+        plano_de(base, pasta_destino=tmp_path / "nada")
+
+
+def test_destino_dentro_da_base(base):
+    with pytest.raises(ErroValidacao, match="dentro da pasta base"):
+        plano_de(base, pasta_destino=base / "a")
+
+
+def test_destino_escolhido_executa(base, tmp_path):
+    outra = tmp_path / "saida"
+    outra.mkdir()
+    plano = plano_de(base, pasta_destino=outra)
+    executar(plano)
+    assert (outra / "Entrega" / "a" / "X-LI-002.pdf").exists()
+    assert not (base.parent / "Entrega").exists()
+
+
+# --- Seleção por NVC / arquivo ---------------------------------------------------------
+
+ARVORE_NVC = ("obra/a/NVC00410A-DE-001.pdf", "obra/a/NVC00410A-LI-002.docx",
+              "obra/a/NVC00410B-DE-001.pdf", "obra/b/NVC00411A-DE-001.pdf",
+              "obra/b/NVC00411A-ET-002.pdf", "obra/b/NVC004101A-DE-001.pdf",
+              "obra/b/leia-me.txt")
+
+
+@pytest.fixture
+def base_nvc(tmp_path):
+    criar(tmp_path, *ARVORE_NVC)
+    return tmp_path / "obra"
+
+
+def entram(plano):
+    return sorted(i.origem.relative_to(plano.base).as_posix()
+                  for i in plano.itens if i.acao != "ignorar")
+
+
+def test_separar_selecao():
+    assert separar_selecao(' NVC00410A;\n"nvc00410a", NVC00411\r\n') == ("NVC00410A",
+                                                                        "NVC00411")
+    assert separar_selecao("  ") == ()
+
+
+@pytest.mark.parametrize("selecao, esperado", [
+    (("NVC00410",), ["a/NVC00410A-DE-001.pdf", "a/NVC00410A-LI-002.docx",
+                     "a/NVC00410B-DE-001.pdf"]),
+    (("NVC00410A",), ["a/NVC00410A-DE-001.pdf", "a/NVC00410A-LI-002.docx"]),
+    (("NVC00410A-DE-001",), ["a/NVC00410A-DE-001.pdf"]),
+    (("nvc00410a-de-001.PDF",), ["a/NVC00410A-DE-001.pdf"]),
+    (("NVC00410B", "NVC00411A-DE-001"), ["a/NVC00410B-DE-001.pdf",
+                                         "b/NVC00411A-DE-001.pdf"]),
+    ((), ["a/NVC00410A-DE-001.pdf", "a/NVC00410A-LI-002.docx", "a/NVC00410B-DE-001.pdf",
+          "b/NVC004101A-DE-001.pdf", "b/NVC00411A-DE-001.pdf"]),
+])
+def test_selecao_filtra(base_nvc, selecao, esperado):
+    plano = plano_de(base_nvc, selecao=selecao)
+    assert entram(plano) == esperado
+    for item in plano.itens:
+        if item.acao != "ignorar":
+            assert item.destino == plano.destino_raiz / item.origem.relative_to(plano.base)
+    if selecao:
+        fora = {i.origem.name: i.motivo for i in plano.itens}
+        assert fora["leia-me.txt"] == "fora da lista"
+    assert plano.problemas == []
+
+
+def test_selecao_problemas(base_nvc):
+    plano = plano_de(base_nvc, selecao=("XYZ", "NVC09999", "NVC00411A-ET-002", "NVC00410A"))
+    assert plano.problemas == [("XYZ", "formato inválido"),
+                               ("NVC09999", "não encontrado na pasta base"),
+                               ("NVC00411A-ET-002", "tipo ET não permitido")]
+    assert entram(plano) == ["a/NVC00410A-DE-001.pdf", "a/NVC00410A-LI-002.docx"]
+
+
+def test_selecao_so_invalidos_nada_entra(base_nvc):
+    plano = plano_de(base_nvc, selecao=("XYZ",))
+    assert plano.a_copiar == [] and plano.a_converter == []
+    assert plano.problemas == [("XYZ", "formato inválido")]
+
+
+def test_selecao_no_relatorio_de_ignorados(base_nvc):
+    plano = plano_de(base_nvc, selecao=("NVC00410A",))
+    executar(plano)
+    _, ignorados = ler_csv(plano.destino_raiz / "arquivos_ignorados.csv")
+    assert ["b/NVC00411A-DE-001.pdf", "fora da lista"] in ignorados

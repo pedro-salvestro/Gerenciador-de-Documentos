@@ -14,6 +14,14 @@ Programa para preparar pastas de entrega de projetos e organizar documentos.
     e pastas vazias não são criadas.
 
   O tipo vem do fim do nome do arquivo: `NVC00410A-DE-001.pdf` → `DE`.
+
+  - **Salvar em** (opcional): pasta onde a pasta nova é criada. Vazio = ao lado da base.
+  - **NVCs / arquivos** (opcional): restringe a entrega a uma lista, um por linha ou
+    separados por vírgula. `NVC00410` → todas as variantes; `NVC00410A` → só essa
+    variante; `NVC00410A-DE-001` → só esse arquivo. A estrutura de pastas é mantida e as
+    regras de tipo continuam valendo. Itens que não levam nenhum arquivo (formato
+    inválido, não encontrados ou fora dos tipos) aparecem na análise e, ao executar, a
+    confirmação pergunta se deseja continuar sem eles.
   **A pasta base nunca é alterada.** Clique em *Analisar* para ver a prévia e em
   *Executar fluxo* para criar a pasta.
 - **Converter**: converte todos os Word/Excel de uma pasta para PDF.
