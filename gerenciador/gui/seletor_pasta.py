@@ -38,6 +38,15 @@ class SeletorPasta(QWidget):
         caminho = Path(texto)
         return caminho if caminho.is_dir() else None
 
+    def trocar_chave(self, chave_config: str) -> None:
+        """Passa a lembrar outra pasta (ex.: um campo com significado diferente por modo):
+        guarda o texto atual na chave antiga e carrega o da nova."""
+        if chave_config == self._chave:
+            return
+        self._config.definir(self._chave, self.campo.text().strip())
+        self._chave = chave_config
+        self.campo.setText(str(self._config.valor(chave_config, "") or ""))
+
     def definir_pasta(self, caminho: Path | str) -> None:
         self.campo.setText(str(caminho))
         self._ao_editar()

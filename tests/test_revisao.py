@@ -62,23 +62,24 @@ def test_c1_conflito_com_pdf_somente_leitura(tmp_path, liberar_somente_leitura):
     assert (plano.destino_raiz / "X-DE-001.pdf").read_bytes() == b"%PDF-fake"
 
 
-def test_c1_falha_ao_apagar_original_vira_erro(tmp_path, monkeypatch):
+def test_c1_falha_ao_remover_temporaria_nao_derruba(tmp_path, monkeypatch):
+    # Os originais convertidos ficam na pasta temporária; se ela não puder ser removida
+    # (arquivo em uso), o fluxo termina normalmente e só avisa.
+    from gerenciador.nucleo import fluxo as modulo_fluxo
     base = tmp_path / "obra"
     criar(tmp_path, "obra/X-LI-001.docx", "obra/X-LI-002.docx")
     plano = planejar_fluxo(ParametrosFluxo(base, "Entrega", TIPOS, processos=1))
-    original = pathlib.Path.unlink
 
-    def unlink(self, *a, **k):
-        if self.name == "X-LI-001.docx":
-            raise PermissionError("em uso")
-        return original(self, *a, **k)
+    def rmtree(caminho, *a, **k):
+        raise PermissionError("em uso")
 
-    monkeypatch.setattr(pathlib.Path, "unlink", unlink)
-    resumo = executar_fluxo(plano, Relatorio(), funcao_conversao=converter_ok,
-                            criar_executor=ThreadPoolExecutor)
-    assert resumo.convertidos == 2
-    assert resumo.erros[0][0] == "X-LI-001.docx"
-    assert (plano.destino_raiz / "X-LI-002.pdf").exists()
+    monkeypatch.setattr(modulo_fluxo.shutil, "rmtree", rmtree)
+    mensagens = []
+    resumo = executar_fluxo(plano, Relatorio(), ao_log=mensagens.append,
+                            funcao_conversao=converter_ok, criar_executor=ThreadPoolExecutor)
+    assert resumo.convertidos == 2 and resumo.erros == []
+    assert (plano.destino_raiz / "X-LI-001.pdf").exists()
+    assert any(m.startswith("AVISO: não foi possível remover a pasta temporária") for m in mensagens)
 
 
 # C2 ----------------------------------------------------------------------------------

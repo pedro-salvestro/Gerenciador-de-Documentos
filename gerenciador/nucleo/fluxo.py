@@ -11,12 +11,13 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from collections.abc import Callable
 from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .arquivos import listar_arquivos, remover_pastas_vazias, tipo_documento
+from .arquivos import listar_arquivos, tipo_documento
 from .constantes import EXCEL, PDF, RELATORIO_CONVERTIDOS, RELATORIO_IGNORADOS, WORD
 from .conversao import (
     ResultadoConversao, TrabalhoConversao, converter_arquivo, executar_conversao,
@@ -27,8 +28,11 @@ from .erros import ErroValidacao
 from .espaco import EspacoTrabalho
 from .relatorios import CABECALHO_IGNORADOS, Relatorio
 
-COPIAR, CONVERTER, IGNORAR = "copiar", "converter", "ignorar"
+COPIAR, CONVERTER, IGNORAR, MANTER = "copiar", "converter", "ignorar", "manter"
 FORA_DA_LISTA = "fora da lista"
+MOTIVO_MANTIDO = "já existe na pasta (mantido)"
+MOTIVO_SUBSTITUIR = "substitui o PDF existente (antigo vai para a Lixeira)"
+PREFIXO_TEMPORARIA = ".pdf_entrega_"
 
 # NVC no começo do nome do arquivo: NVC00410A-DE-001 -> ("00410", "A").
 _NVC_ARQUIVO = re.compile(r"NVC(\d+)([A-Z]?)(?![A-Z0-9])", re.IGNORECASE)
@@ -91,14 +95,18 @@ class ParametrosFluxo:
     processos: int = 2
     pasta_destino: Path | None = None  # None = ao lado da pasta base
     selecao: tuple[str, ...] = ()  # NVCs/arquivos; vazio = todos
+    pasta_existente: bool = False  # True = pasta_destino é a própria entrega (já existe)
+    substituir_existentes: bool = False  # só na pasta existente: PDF antigo vai à Lixeira
 
 
 @dataclass
 class ItemFluxo:
     origem: Path
-    acao: str  # "copiar" | "converter" | "ignorar"
+    acao: str  # "copiar" | "converter" | "ignorar" | "manter"
     motivo: str = ""
-    destino: Path | None = None
+    destino: Path | None = None  # cópia na entrega (para Word/Excel: onde ficaria o original)
+    final: Path | None = None  # arquivo que fica na entrega (o PDF, quando há conversão)
+    substituir: bool = False  # final já existe e será substituído
 
 
 @dataclass
@@ -126,6 +134,14 @@ class PlanoFluxo:
     def ignorados(self) -> list[ItemFluxo]:
         return self._com_acao(IGNORAR)
 
+    @property
+    def mantidos(self) -> list[ItemFluxo]:
+        return self._com_acao(MANTER)
+
+    @property
+    def a_substituir(self) -> list[ItemFluxo]:
+        return [i for i in self.itens if i.substituir]
+
 
 @dataclass
 class ResumoFluxo:
@@ -133,6 +149,8 @@ class ResumoFluxo:
     copiados: int = 0
     convertidos: int = 0
     ignorados: int = 0
+    mantidos: int = 0
+    substituidos: int = 0
     erros: list[tuple[str, str]] = field(default_factory=list)
     cancelado: bool = False
 
@@ -151,25 +169,42 @@ def _classificar(caminho: Path, tipos: frozenset[str], converter: bool) -> tuple
     return IGNORAR, f"formato {sufixo or '(sem extensão)'} não aceito"
 
 
+def _destino_raiz(p: ParametrosFluxo, espaco: EspacoTrabalho) -> Path:
+    """Pasta da entrega: a nova (que ainda não pode existir) ou a existente escolhida."""
+    if p.pasta_existente:
+        if p.pasta_destino is None or not str(p.pasta_destino).strip():
+            raise ErroValidacao('Escolha a pasta existente em "Salvar em".')
+        if not Path(p.pasta_destino).is_dir():
+            raise ErroValidacao("A pasta onde salvar não existe.", [str(p.pasta_destino)])
+        destino_raiz = Path(p.pasta_destino).resolve()
+        mensagem_dentro = "A pasta de destino não pode ser a pasta base nem ficar dentro dela."
+    else:
+        nome = validar_nome_pasta(p.nome_destino)
+        if p.pasta_destino is None:
+            pasta_destino = espaco.raiz.parent
+        elif Path(p.pasta_destino).is_dir():
+            pasta_destino = Path(p.pasta_destino).resolve()
+        else:
+            raise ErroValidacao("A pasta onde salvar não existe.", [str(p.pasta_destino)])
+        destino_raiz = pasta_destino / nome
+        mensagem_dentro = "A pasta nova não pode ficar dentro da pasta base."
+    if not p.tipos:
+        raise ErroValidacao("Informe ao menos um tipo de documento.")
+    if destino_raiz == espaco.raiz or espaco.raiz in destino_raiz.parents:
+        raise ErroValidacao(mensagem_dentro, [str(destino_raiz)])
+    if destino_raiz in espaco.raiz.parents:
+        raise ErroValidacao("A pasta de destino não pode conter a pasta base.",
+                            [str(destino_raiz)])
+    if not p.pasta_existente and destino_raiz.exists():
+        raise ErroValidacao("Já existe uma pasta com esse nome; escolha outro nome ou use "
+                            '"Adicionar a uma pasta existente".', [str(destino_raiz)])
+    return destino_raiz
+
+
 def planejar_fluxo(p: ParametrosFluxo) -> PlanoFluxo:
     """Valida os parâmetros e classifica cada arquivo da base. Não escreve nada."""
     espaco = EspacoTrabalho.abrir(p.base)
-    nome = validar_nome_pasta(p.nome_destino)
-    if not p.tipos:
-        raise ErroValidacao("Informe ao menos um tipo de documento.")
-    if p.pasta_destino is None:
-        pasta_destino = espaco.raiz.parent
-    elif Path(p.pasta_destino).is_dir():
-        pasta_destino = Path(p.pasta_destino).resolve()
-    else:
-        raise ErroValidacao("A pasta onde salvar não existe.", [str(p.pasta_destino)])
-    destino_raiz = pasta_destino / nome
-    if destino_raiz == espaco.raiz or espaco.raiz in destino_raiz.parents:
-        raise ErroValidacao("A pasta nova não pode ficar dentro da pasta base.",
-                            [str(destino_raiz)])
-    if destino_raiz.exists():
-        raise ErroValidacao("Já existe uma pasta com esse nome; escolha outro nome.",
-                            [str(destino_raiz)])
+    destino_raiz = _destino_raiz(p, espaco)
 
     chaves = [(item, _chave_selecao(item)) for item in p.selecao]
     validas = [(item, chave) for item, chave in chaves if chave is not None]
@@ -198,10 +233,31 @@ def planejar_fluxo(p: ParametrosFluxo) -> PlanoFluxo:
             motivos = dict.fromkeys(i.motivo for i in achados[item])
             problemas.append((item, "; ".join(motivos)))
 
+    # Os nomes dos PDFs são calculados com todos os Word/Excel (inclusive os que serão
+    # mantidos), para não mudarem entre uma execução e outra na mesma pasta.
     trabalhos = planejar_conversao([i.destino for i in itens if i.acao == CONVERTER])
+    pdf_de = {str(t.origem).casefold(): t.destino for t in trabalhos}
+    for item in itens:
+        if item.acao == IGNORAR:
+            continue
+        item.final = pdf_de[str(item.destino).casefold()] if item.acao == CONVERTER \
+            else item.destino
+        if item.final.exists():  # só acontece na pasta existente
+            if p.substituir_existentes:
+                item.substituir, item.motivo = True, MOTIVO_SUBSTITUIR
+            else:
+                item.acao, item.motivo = MANTER, MOTIVO_MANTIDO
+    mantidos = {str(i.destino).casefold() for i in itens if i.acao == MANTER}
+    trabalhos = [t for t in trabalhos if str(t.origem).casefold() not in mantidos]
+
     copiados = {str(i.destino).casefold() for i in itens if i.acao == COPIAR}
     conflitos = [t.destino for t in trabalhos if str(t.destino).casefold() in copiados]
     return PlanoFluxo(p, espaco.raiz, destino_raiz, itens, trabalhos, conflitos, problemas)
+
+
+def _lixeira_padrao(caminho: str) -> None:
+    from send2trash import send2trash
+    send2trash(caminho)
 
 
 def executar_fluxo(
@@ -212,75 +268,166 @@ def executar_fluxo(
     cancelado: Callable[[], bool] = lambda: False,
     funcao_conversao: Callable[..., tuple[str, str]] = converter_arquivo,
     criar_executor: Callable[[int], Executor] | None = None,
+    lixeira: Callable[[str], None] | None = None,
 ) -> ResumoFluxo:
-    """Cria a pasta nova, copia, converte, apaga os originais convertidos e limpa
-    pastas vazias. Falhas por arquivo são registradas e o fluxo continua."""
+    """Copia os PDFs, converte os Word/Excel numa pasta temporária e move só os PDFs
+    prontos para a entrega. Na pasta existente, nada que já estava lá é apagado ou
+    sobrescrito, exceto PDFs marcados para substituir (que vão para a Lixeira).
+    Falhas por arquivo são registradas e o fluxo continua."""
     destino_raiz = plano.destino_raiz
-    resumo = ResumoFluxo(destino_raiz, ignorados=len(plano.ignorados))
+    resumo = ResumoFluxo(destino_raiz, ignorados=len(plano.ignorados),
+                         mantidos=len(plano.mantidos))
     progresso = ao_progresso or (lambda etapa, atual, total: None)
     log = ao_log or (lambda mensagem: None)
+    enviar_lixeira = lixeira or _lixeira_padrao
 
     def rel(caminho: Path) -> str:
         return caminho.relative_to(destino_raiz).as_posix()
 
-    try:
-        destino_raiz.mkdir(parents=False)
-    except FileExistsError as erro:
-        raise ErroValidacao("Já existe uma pasta com esse nome; escolha outro nome.",
-                            [str(destino_raiz)]) from erro
-    except OSError as erro:
-        raise ErroValidacao(f"Não foi possível criar a pasta nova: {erro}",
-                            [str(destino_raiz)]) from erro
-    log(f"Pasta criada: {destino_raiz}")
+    def erro(caminho: Path, detalhe: str) -> None:
+        resumo.erros.append((rel(caminho), detalhe))
+        log(f"ERRO: {rel(caminho)}: {detalhe}")
 
-    # 1. Cópia dos arquivos que entram na entrega.
-    a_copiar = [i for i in plano.itens if i.acao != IGNORAR]
-    falharam: set[str] = set()
-    for numero, item in enumerate(a_copiar, 1):
+    if plano.parametros.pasta_existente:
+        if not destino_raiz.is_dir():
+            raise ErroValidacao("A pasta de destino não existe mais.", [str(destino_raiz)])
+        log(f"Adicionando à pasta: {destino_raiz}")
+    else:
+        try:
+            destino_raiz.mkdir(parents=False)
+        except FileExistsError as falha:
+            raise ErroValidacao("Já existe uma pasta com esse nome; escolha outro nome.",
+                                [str(destino_raiz)]) from falha
+        except OSError as falha:
+            raise ErroValidacao(f"Não foi possível criar a pasta nova: {falha}",
+                                [str(destino_raiz)]) from falha
+        log(f"Pasta criada: {destino_raiz}")
+
+    criadas: list[Path] = []  # só estas podem ser removidas no fim
+    gravados: set[str] = set()  # arquivos finais escritos por esta execução
+
+    def garantir_pasta(pasta: Path) -> None:
+        faltando = []
+        while pasta != destino_raiz and not pasta.exists():
+            faltando.append(pasta)
+            pasta = pasta.parent
+        for nova in reversed(faltando):
+            nova.mkdir()
+            criadas.append(nova)
+
+    def liberar(final: Path, substituir: bool) -> str | None:
+        """Deixa o caminho final livre para gravar. Devolve o motivo se não puder."""
+        if not final.exists() or str(final).casefold() in gravados:
+            return None
+        if not substituir:
+            return "já existe na pasta; não foi substituído"
+        try:
+            enviar_lixeira(str(final))
+        except Exception as falha:  # noqa: BLE001 - o antigo é preservado
+            return f"não foi possível enviar o PDF antigo à Lixeira: {falha}"
+        resumo.substituidos += 1
+        log(f"Enviado à Lixeira: {rel(final)}")
+        return None
+
+    def copiar(origem: Path, destino: Path) -> None:
+        garantir_pasta(destino.parent)
+        try:
+            shutil.copy2(origem, destino)
+            # A cópia herda "somente leitura" da origem; precisa poder ser substituída.
+            os.chmod(destino, stat.S_IREAD | stat.S_IWRITE)
+        except OSError:
+            if destino.exists():
+                try:
+                    destino.unlink()  # não deixa cópia parcial
+                except OSError:
+                    pass
+            raise
+
+    def devolver(temporario: Path, item: ItemFluxo, motivo: str = "") -> None:
+        """Word/Excel não convertido vai para o lugar dele na entrega, sem sobrescrever."""
+        assert item.destino is not None
+        if item.destino.exists():
+            erro(item.destino, (f"{motivo}; " if motivo else "não convertido; ")
+                 + "já existe um arquivo com esse nome na pasta, o original não foi copiado")
+            return
+        try:
+            garantir_pasta(item.destino.parent)
+            os.replace(temporario, item.destino)
+        except OSError as falha:
+            erro(item.destino, f"{motivo or 'não convertido'}; não foi possível colocar o "
+                               f"original na entrega: {falha}")
+            return
+        if motivo:
+            erro(item.destino, motivo)
+
+    # 1. Cópias: PDFs direto para o lugar final; Word/Excel para a pasta temporária.
+    entram = [i for i in plano.itens if i.acao in (COPIAR, CONVERTER)]
+    temporaria: Path | None = None
+    if any(i.acao == CONVERTER for i in entram):
+        temporaria = Path(tempfile.mkdtemp(prefix=PREFIXO_TEMPORARIA, dir=destino_raiz))
+    item_por_copia = {str(i.destino).casefold(): i for i in entram if i.acao == CONVERTER}
+    preparados: dict[str, tuple[ItemFluxo, TrabalhoConversao]] = {}
+    trabalhos: list[TrabalhoConversao] = []
+    trabalho_de = {str(t.origem).casefold(): t for t in plano.trabalhos}
+    for numero, item in enumerate(entram, 1):
         if cancelado():
             resumo.cancelado = True
             log("Interrompido pelo usuário durante a cópia.")
             break
-        assert item.destino is not None
-        try:
-            item.destino.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item.origem, item.destino)
-            # A cópia herda "somente leitura" da origem; na pasta nova ela precisa poder
-            # ser substituída (conflito de PDF) ou apagada (original já convertido).
-            os.chmod(item.destino, stat.S_IREAD | stat.S_IWRITE)
-            if item.acao == COPIAR:
-                resumo.copiados += 1
-        except OSError as erro:
-            if item.destino.exists():
+        assert item.destino is not None and item.final is not None
+        if item.acao == COPIAR:
+            motivo = liberar(item.final, item.substituir)
+            if motivo:
+                erro(item.final, motivo)
+            else:
                 try:
-                    item.destino.unlink()  # não deixa cópia parcial na entrega
-                except OSError:
-                    pass
-            falharam.add(str(item.destino).casefold())
-            resumo.erros.append((rel(item.destino), f"falha ao copiar: {erro}"))
-            log(f"ERRO: {rel(item.destino)}: falha ao copiar: {erro}")
-        progresso("Copiando", numero, len(a_copiar))
+                    copiar(item.origem, item.final)
+                    gravados.add(str(item.final).casefold())
+                    resumo.copiados += 1
+                except OSError as falha:
+                    erro(item.final, f"falha ao copiar: {falha}")
+        else:
+            assert temporaria is not None
+            final = trabalho_de[str(item.destino).casefold()]
+            trabalho = TrabalhoConversao(temporaria / final.origem.relative_to(destino_raiz),
+                                         temporaria / final.destino.relative_to(destino_raiz))
+            try:
+                trabalho.origem.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item.origem, trabalho.origem)
+                os.chmod(trabalho.origem, stat.S_IREAD | stat.S_IWRITE)
+            except OSError as falha:
+                erro(item.destino, f"falha ao copiar: {falha}")
+            else:
+                trabalhos.append(trabalho)
+                preparados[str(trabalho.origem).casefold()] = (item, trabalho)
+        progresso("Copiando", numero, len(entram))
 
-    # 2. Conversão dos Word/Excel copiados; o original sai só se a conversão deu certo.
+    # 2. Conversão na pasta temporária; só o PDF pronto vai para a entrega.
     resultados: list[ResultadoConversao] = []
-    trabalhos = [t for t in plano.trabalhos
-                 if str(t.origem).casefold() not in falharam and t.origem.exists()]
-    if trabalhos and not resumo.cancelado:
+    if trabalhos and resumo.cancelado:
+        for item, trabalho in preparados.values():
+            devolver(trabalho.origem, item)
+    elif trabalhos:
         def concluido(resultado: ResultadoConversao, feitos: int, total: int) -> None:
-            origem = resultado.trabalho.origem
+            item, trabalho = preparados[str(resultado.trabalho.origem).casefold()]
+            assert item.final is not None
             if resultado.status == "convertido":
-                resumo.convertidos += 1
-                log(f"OK: {rel(resultado.trabalho.destino)}")
-                try:
-                    if destino_raiz in origem.resolve().parents:
-                        origem.unlink()
-                except OSError as erro:
-                    resumo.erros.append((rel(origem), f"PDF gerado, mas o original não "
-                                                      f"pôde ser removido: {erro}"))
-                    log(f"ERRO: {rel(origem)}: original não removido: {erro}")
+                motivo = liberar(item.final, item.substituir)
+                if motivo:
+                    erro(item.final, motivo)
+                else:
+                    try:
+                        garantir_pasta(item.final.parent)
+                        os.replace(trabalho.destino, item.final)
+                        gravados.add(str(item.final).casefold())
+                        resumo.convertidos += 1
+                        log(f"OK: {rel(item.final)}")
+                    except OSError as falha:
+                        erro(item.final, f"PDF gerado, mas não foi possível gravá-lo: {falha}")
             elif resultado.status == "erro":
-                resumo.erros.append((rel(origem), resultado.detalhe))
-                log(f"ERRO: {rel(origem)}: {resultado.detalhe}")
+                devolver(trabalho.origem, item, resultado.detalhe)
+            else:  # cancelado: o original fica na entrega, como antes
+                devolver(trabalho.origem, item)
             progresso("Convertendo", feitos, total)
 
         resultados = executar_conversao(
@@ -290,12 +437,22 @@ def executar_fluxo(
             resumo.cancelado = True
             log("Interrompido pelo usuário: conversões pendentes não foram feitas.")
 
-    # 3. Limpeza e relatórios.
+    # 3. Limpeza (só o que esta execução criou) e relatórios.
     progresso("Finalizando", 0, 1)
-    remover_pastas_vazias(destino_raiz)
-    if resultados:
-        gravar_relatorio_conversao(resultados, destino_raiz, relatorio,
-                                   destino_raiz / RELATORIO_CONVERTIDOS)
+    if temporaria is not None:
+        if resultados:
+            gravar_relatorio_conversao(resultados, temporaria, relatorio,
+                                       destino_raiz / RELATORIO_CONVERTIDOS, acrescentar=True)
+        try:
+            shutil.rmtree(temporaria)
+        except OSError as falha:
+            log(f"AVISO: não foi possível remover a pasta temporária {temporaria}: {falha}")
+    for pasta in sorted(criadas, key=lambda p: len(p.parts), reverse=True):
+        try:
+            if not any(pasta.iterdir()):
+                pasta.rmdir()
+        except OSError:
+            pass
     relatorio.gravar(destino_raiz / RELATORIO_IGNORADOS, CABECALHO_IGNORADOS,
                      [[i.origem.relative_to(plano.base).as_posix(), i.motivo]
                       for i in plano.ignorados])

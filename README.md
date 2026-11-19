@@ -22,8 +22,15 @@ Programa para preparar pastas de entrega de projetos e organizar documentos.
     regras de tipo continuam valendo. Itens que não levam nenhum arquivo (formato
     inválido, não encontrados ou fora dos tipos) aparecem na análise e, ao executar, a
     confirmação pergunta se deseja continuar sem eles.
+  - **Adicionar a uma pasta existente** (opção *Destino*): em vez de criar uma pasta
+    nova, os PDFs entram numa entrega já começada, apontada em *Salvar em* — útil para
+    acrescentar NVCs depois. As subpastas que faltarem são criadas. PDFs que **já
+    existem** na pasta são **mantidos** (aparecem como "Já existe (mantido)"); marque
+    *Substituir PDFs que já existem* para trocá-los — os antigos vão para a **Lixeira**.
+    A conversão é feita numa pasta temporária, então nenhum Word/Excel ou pasta que já
+    estava lá é apagado. O relatório de convertidos acumula as execuções.
   **A pasta base nunca é alterada.** Clique em *Analisar* para ver a prévia e em
-  *Executar fluxo* para criar a pasta.
+  *Executar fluxo* para criar a pasta (ou adicionar à existente).
 - **Converter**: converte todos os Word/Excel de uma pasta para PDF.
 - **Limpeza**: envia à Lixeira arquivos ou pastas (9 modos, com prévia e confirmação).
 - **Copiar por código**: copia arquivos `NVC…` para `NVCxxx/variante/<nome>`.

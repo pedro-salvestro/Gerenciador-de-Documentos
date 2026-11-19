@@ -9,14 +9,15 @@ from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
 from ..nucleo.conversao import converter_arquivo, processos_padrao
 from ..nucleo.erros import ErroValidacao
 from ..nucleo.fluxo import (
-    COPIAR, CONVERTER, IGNORAR, ParametrosFluxo, PlanoFluxo, ResumoFluxo, executar_fluxo,
+    COPIAR, CONVERTER, IGNORAR, MANTER, ParametrosFluxo, PlanoFluxo, ResumoFluxo, executar_fluxo,
     planejar_fluxo, separar_selecao, separar_tipos,
 )
 from ..nucleo.constantes import TIPOS_PADRAO
@@ -27,8 +28,11 @@ from .seletor_pasta import SeletorPasta
 from .tabela_itens import TabelaItens
 from .trabalhador import Trabalhador, executar_em_segundo_plano
 
-ROTULO_ACAO = {COPIAR: "Copiar", CONVERTER: "Converter", IGNORAR: "Fora da entrega"}
-FILTROS = ("Todos", "Copiar", "Converter", "Fora da entrega")
+ROTULO_ACAO = {COPIAR: "Copiar", CONVERTER: "Converter", IGNORAR: "Fora da entrega",
+               MANTER: "Já existe (mantido)"}
+FILTROS = ("Todos", "Copiar", "Converter", "Já existe", "Fora da entrega")
+TEXTO_SUBSTITUIR = "Substituir PDFs que já existem (os antigos vão para a Lixeira)"
+CHAVE_MODO = "fluxo/pasta_existente"
 LIMITE_PROBLEMAS_RESUMO = 5
 
 
@@ -45,8 +49,10 @@ class AbaFluxo(QWidget):
     def __init__(self, configuracoes: Configuracoes, obter_relatorio: Callable[[], Relatorio],
                  funcao_conversao: Callable[..., tuple[str, str]] = converter_arquivo,
                  criar_executor: Callable[[int], Executor] | None = None,
+                 lixeira: Callable[[str], None] | None = None,
                  pai: QWidget | None = None):
         super().__init__(pai)
+        self._lixeira = lixeira
         self._config = configuracoes
         self._obter_relatorio = obter_relatorio
         self._funcao_conversao = funcao_conversao
@@ -64,6 +70,20 @@ class AbaFluxo(QWidget):
 
     def _montar(self) -> None:
         self.seletor_base = SeletorPasta("", "fluxo/base", self._config)
+        self.opcao_nova = QRadioButton("Criar pasta nova")
+        self.opcao_existente = QRadioButton("Adicionar a uma pasta existente")
+        self.opcao_nova.setChecked(True)
+        self._grupo_modo = QButtonGroup(self)
+        self._grupo_modo.addButton(self.opcao_nova)
+        self._grupo_modo.addButton(self.opcao_existente)
+        modo = QHBoxLayout()
+        modo.addWidget(self.opcao_nova)
+        modo.addWidget(self.opcao_existente)
+        modo.addStretch(1)
+        self.caixa_substituir = QCheckBox(TEXTO_SUBSTITUIR)
+        self.caixa_substituir.setToolTip(
+            "Desmarcado: os PDFs que já estão na pasta são mantidos e só entra o que é novo.")
+        self.caixa_substituir.setVisible(False)
         self.campo_nome = QLineEdit()
         self.campo_nome.setPlaceholderText("Ex.: Obra X - Entrega")
         self.seletor_destino = SeletorPasta("", "fluxo/destino", self._config)
@@ -96,9 +116,11 @@ class AbaFluxo(QWidget):
 
         formulario = QFormLayout()
         formulario.addRow("Pasta base:", self.seletor_base)
+        formulario.addRow("Destino:", modo)
         formulario.addRow("Nome da pasta nova:", self.campo_nome)
         formulario.addRow("Salvar em:", self.seletor_destino)
         formulario.addRow("", self.rotulo_destino)
+        formulario.addRow("", self.caixa_substituir)
         formulario.addRow("Tipos mantidos:", self.campo_tipos)
         formulario.addRow("NVCs / arquivos:", self.campo_selecao)
         formulario.addRow("Opções:", opcoes)
@@ -164,6 +186,9 @@ class AbaFluxo(QWidget):
         self.caixa_converter.setChecked(self._config.valor_bool("fluxo/converter", True))
         self.campo_processos.setValue(
             self._config.valor_int("fluxo/processos", processos_padrao(16)))
+        if self._config.valor_bool(CHAVE_MODO, False):
+            self.opcao_existente.setChecked(True)
+        self._aplicar_modo()
 
     def _conectar(self) -> None:
         self.seletor_base.pasta_alterada.connect(lambda _: self._parametros_mudaram())
@@ -172,6 +197,8 @@ class AbaFluxo(QWidget):
         self.campo_tipos.textChanged.connect(self._parametros_mudaram)
         self.campo_selecao.textChanged.connect(self._parametros_mudaram)
         self.caixa_converter.toggled.connect(self._parametros_mudaram)
+        self.opcao_existente.toggled.connect(self._modo_mudou)
+        self.caixa_substituir.toggled.connect(self._parametros_mudaram)
         self.campo_processos.valueChanged.connect(
             lambda v: self._config.definir("fluxo/processos", v))
         self.filtro_acao.currentTextChanged.connect(self._aplicar_filtro)
@@ -192,6 +219,27 @@ class AbaFluxo(QWidget):
         self.botao_executar.setEnabled(False)
         self._atualizar_destino()
 
+    def _modo_existente(self) -> bool:
+        return self.opcao_existente.isChecked()
+
+    def _aplicar_modo(self) -> None:
+        existente = self._modo_existente()
+        self.campo_nome.setEnabled(not existente)
+        self.caixa_substituir.setVisible(existente)
+        if not existente:
+            self.caixa_substituir.setChecked(False)
+        # "Salvar em" significa coisas diferentes em cada modo (pasta-pai x a própria
+        # entrega): cada modo lembra a sua, para não herdar a pasta-pai por engano.
+        self.seletor_destino.trocar_chave(
+            "fluxo/destino_existente" if existente else "fluxo/destino")
+        self.seletor_destino.campo.setPlaceholderText(
+            "Pasta da entrega já existente" if existente else "Vazio = ao lado da pasta base")
+
+    def _modo_mudou(self, *_args) -> None:
+        self._config.definir(CHAVE_MODO, self._modo_existente())
+        self._aplicar_modo()
+        self._parametros_mudaram()
+
     def _texto_base(self) -> str:
         return self.seletor_base.campo.text().strip()
 
@@ -199,6 +247,11 @@ class AbaFluxo(QWidget):
         return self.seletor_destino.campo.text().strip()
 
     def _atualizar_destino(self) -> None:
+        if self._modo_existente():
+            self.rotulo_destino.setText(
+                f"→ os PDFs serão adicionados em: {self._texto_destino()}"
+                if self._texto_destino() else '→ escolha a pasta existente em "Salvar em"')
+            return
         base, nome = self._texto_base(), self.campo_nome.text().strip()
         pasta = self._texto_destino() or (str(Path(base).parent) if base else "")
         if pasta and nome:
@@ -218,7 +271,9 @@ class AbaFluxo(QWidget):
             converter=self.caixa_converter.isChecked(),
             processos=self.campo_processos.value(),
             pasta_destino=Path(destino) if destino else None,
-            selecao=separar_selecao(self.campo_selecao.toPlainText()))
+            selecao=separar_selecao(self.campo_selecao.toPlainText()),
+            pasta_existente=self._modo_existente(),
+            substituir_existentes=self._modo_existente() and self.caixa_substituir.isChecked())
 
     def _aplicar_filtro(self, texto: str) -> None:
         self.tabela.filtrar_coluna(1, "" if texto == "Todos" else texto)
@@ -255,9 +310,14 @@ class AbaFluxo(QWidget):
         partes = [f"{len(plano.a_copiar)} PDFs a copiar",
                   f"{len(plano.a_converter)} Word/Excel a converter",
                   f"{len(plano.ignorados)} fora da entrega"]
+        if plano.mantidos:
+            partes.append(f"{len(plano.mantidos)} já existem (mantidos)")
+        if plano.a_substituir:
+            partes.append(f"{len(plano.a_substituir)} PDFs serão substituídos")
         if plano.conflitos:
             partes.append(f"{len(plano.conflitos)} conflitos de PDF")
-        texto = " · ".join(partes) + f"\nPasta nova: {plano.destino_raiz}"
+        rotulo = "Pasta existente" if plano.parametros.pasta_existente else "Pasta nova"
+        texto = " · ".join(partes) + f"\n{rotulo}: {plano.destino_raiz}"
         if plano.problemas:
             texto += "\n" + resumir_problemas(plano.problemas)
         self.rotulo_resumo.setText(texto)
@@ -280,11 +340,20 @@ class AbaFluxo(QWidget):
             aviso = ("Estes itens da lista não vão entrar:\n"
                      + listar_itens([f"{item} — {motivo}" for item, motivo in plano.problemas])
                      + "\n\nDeseja continuar sem eles?\n\n")
+        existente = plano.parametros.pasta_existente
+        linhas_existentes = ""
+        if plano.mantidos:
+            linhas_existentes += f"• {len(plano.mantidos)} já existem na pasta e serão mantidos\n"
+        if plano.a_substituir:
+            linhas_existentes += (f"• {len(plano.a_substituir)} PDFs existentes serão "
+                                  "substituídos (os antigos vão para a Lixeira)\n")
         if not confirmar(
                 self, "Executar fluxo",
-                f"{aviso}Criar a pasta:\n{plano.destino_raiz}\n\n"
+                f"{aviso}{'Adicionar à pasta' if existente else 'Criar a pasta'}:\n"
+                f"{plano.destino_raiz}\n\n"
                 f"• {len(plano.a_copiar)} PDFs serão copiados\n"
                 f"• {len(plano.a_converter)} Word/Excel serão convertidos\n"
+                f"{linhas_existentes}"
                 f"• {len(plano.ignorados)} arquivos ficam fora da entrega\n\n"
                 "A pasta base não será alterada. Continuar?"):
             return
@@ -299,7 +368,7 @@ class AbaFluxo(QWidget):
             lambda ctx: executar_fluxo(
                 plano, relatorio, ao_progresso=ctx.progresso, ao_log=ctx.log,
                 cancelado=ctx.cancelado, funcao_conversao=self._funcao_conversao,
-                criar_executor=self._criar_executor),
+                criar_executor=self._criar_executor, lixeira=self._lixeira),
             ao_concluir=self._ao_executar, ao_falhar=self._ao_falhar_execucao,
             ao_progresso=self._ao_progresso, ao_log=self.log.appendPlainText)
 
@@ -316,8 +385,10 @@ class AbaFluxo(QWidget):
         situacao = "Interrompido" if resumo.cancelado else "Concluído"
         self.rotulo_resumo.setText(
             f"{situacao} · {resumo.copiados} PDFs copiados · {resumo.convertidos} convertidos"
-            f" · {len(resumo.erros)} erros · {resumo.ignorados} fora da entrega"
-            f"\nPasta nova: {resumo.destino_raiz}")
+            f" · {resumo.mantidos} mantidos"
+            + (f" · {resumo.substituidos} substituídos" if resumo.substituidos else "")
+            + f" · {len(resumo.erros)} erros · {resumo.ignorados} fora da entrega"
+            f"\nPasta: {resumo.destino_raiz}")
         if resumo.erros:
             self.log.appendPlainText("\nArquivos com erro:")
             for arquivo, detalhe in resumo.erros:
@@ -344,8 +415,12 @@ class AbaFluxo(QWidget):
 
     def _definir_ocupado(self, ocupado: bool, cancelavel: bool = False) -> None:
         for widget in (self.seletor_base, self.campo_nome, self.seletor_destino,
-                       self.campo_tipos, self.campo_selecao, self.caixa_converter, self.campo_processos, self.botao_analisar):
+                       self.opcao_nova, self.opcao_existente, self.caixa_substituir,
+                       self.campo_tipos, self.campo_selecao, self.caixa_converter,
+                       self.campo_processos, self.botao_analisar):
             widget.setEnabled(not ocupado)
+        if not ocupado:
+            self.campo_nome.setEnabled(not self._modo_existente())
         if ocupado:
             self.botao_executar.setEnabled(False)
         self.barra.setVisible(ocupado and cancelavel)

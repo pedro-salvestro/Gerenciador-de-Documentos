@@ -39,6 +39,23 @@ class Relatorio:
             return None
         return caminho
 
+    def acrescentar(self, caminho: Path, cabecalho: list[str],
+                    linhas: list[list[str]]) -> Path | None:
+        """Acrescenta linhas ao CSV; o cabeçalho (e o BOM) só entram se o arquivo é novo."""
+        if not self.ativo:
+            return None
+        try:
+            novo = not caminho.exists()
+            with caminho.open("a", newline="", encoding="utf-8-sig" if novo else "utf-8") as arquivo:
+                escritor = csv.writer(arquivo, delimiter=";")
+                if novo:
+                    escritor.writerow(cabecalho)
+                escritor.writerows(linhas)
+        except OSError as erro:
+            self.erros.append(f"Relatório não gravado ({caminho.name}): {erro}")
+            return None
+        return caminho
+
 
 def ler_csv(caminho: Path) -> tuple[list[str], list[list[str]]]:
     with caminho.open(encoding="utf-8-sig", newline="") as arquivo:

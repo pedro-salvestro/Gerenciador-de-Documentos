@@ -383,12 +383,14 @@ def executar_conversao(
 
 
 def gravar_relatorio_conversao(resultados: list[ResultadoConversao], base_relativa: Path,
-                               relatorio: Relatorio, caminho: Path) -> Path | None:
+                               relatorio: Relatorio, caminho: Path,
+                               acrescentar: bool = False) -> Path | None:
     linhas = [[r.data_hora,
                r.trabalho.origem.relative_to(base_relativa).as_posix(),
                r.trabalho.destino.relative_to(base_relativa).as_posix(),
                r.status, r.detalhe] for r in resultados]
-    return relatorio.gravar(caminho, CABECALHO_CONVERTIDOS, linhas)
+    gravar = relatorio.acrescentar if acrescentar else relatorio.gravar
+    return gravar(caminho, CABECALHO_CONVERTIDOS, linhas)
 
 
 def detectar_mecanismos() -> dict[str, bool]:
